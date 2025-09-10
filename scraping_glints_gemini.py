@@ -12,6 +12,7 @@ Contoh pakai:
     --no-headless ^
     --max-scrolls 40 ^
     --out jobs_social_media
+    --keep-tabs
 
 Gemini:
   Buat .env berisi GEMINI_API_KEY=xxx
@@ -212,11 +213,14 @@ def flatten_ws(s: str) -> str:
     s = s.replace("\r", " ").replace("\n", " ").replace("\u00A0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
-def clean_salary(val: str) -> str:
-    """Ambil inti gaji atau 'Gaji Tidak Ditampilkan'."""
+def clean_salary(val: str, title: str = "") -> str:
     t = flatten_ws(val)
     if not t:
         return ""
+    # hapus title kalau nyampur
+    if title and t.lower().startswith(title.lower()):
+        t = t[len(title):].strip()
+
     if re.search(r"gaji\s+tidak\s+ditampilkan|not\s+disclosed", t, re.I):
         return "Gaji Tidak Ditampilkan"
     m = re.search(r"(Rp[^A-Za-z]*?\d[\d\.\,\s\-–to+]*\d(?:\s*jt)?)", t, re.I)
@@ -816,11 +820,19 @@ def parse_job_card(card) -> Dict[str, Any]:
 
     // ===== Salary =====
     let salary = "";
+    // Cari elemen salary yang jelas
     const sal1 = q("[data-testid='salary'], [class*='SalaryWrapper'], [class*='Salary']");
-    if (sal1) salary = textOf(sal1);
+    if (sal1) {
+    salary = textOf(sal1);
+    }
     if (!salary) {
-      const notD = q("[class*='NotDisclosed']");
-      if (notD) salary = textOf(notD);
+    const notD = q("[class*='NotDisclosed']");
+    if (notD) salary = textOf(notD);
+    }
+
+    // Hapus kasus kalau salary kebawa title
+    if (salary && salary.toLowerCase().includes(title.toLowerCase())) {
+    salary = salary.replace(title, "").trim();
     }
 
     // ===== Tags =====
@@ -898,53 +910,41 @@ class EnrichedJob(Job):
     languages: List[str] = None
     confidence: float = 0.0
 
-def scrape_glints(keyword: str, country: str, max_scrolls: int, headless: bool, container_xpath: str, use_uc: bool, cookies_arg: str | None = None) -> List[Job]:
-    url = GLINTS_BASE_URL.format(keyword=keyword.replace(" ", "+"), country=country)
+def scrape_current_page(driver: webdriver.Chrome, container_xpath: str, keyword: str) -> List[Job]:
+    """Asumsikan halaman glints untuk keyword ini SUDAH TERBUKA di driver.current_window_handle."""
+    try_accept_cookies(driver)
+    _ = wait_for_cards_count(driver, min_count=2, timeout=20)
+    jobs = extract_jobs_from_container(driver, container_xpath, keyword)
+    print(f"[result] jobs parsed: {len(jobs)}")
+    return jobs
 
-    def _new_driver(use_uc_flag: bool):
-        return init_webdriver(headless=headless, use_uc=use_uc_flag)
+def open_tab_and_scrape(driver: webdriver.Chrome, url: str, container_xpath: str, keyword: str, close_tab_after=True) -> List[Job]:
+    """Buka TAB BARU untuk url, scrape, lalu (opsional) tutup tab."""
+    # buka tab baru
+    driver.execute_script(f"window.open({json.dumps(url)}, '_blank');")
+    new_handle = driver.window_handles[-1]
+    driver.switch_to.window(new_handle)
 
-    driver = _new_driver(use_uc)
+    # load selesai (simple wait; glints heavy SPA jadi beri sleep kecil)
     try:
-        try:
-            # 1) buka target dulu (boleh), nanti kita reload lagi setelah inject cookies
-            driver.get(url)
-        except (WebDriverException, NoSuchWindowException):
+        driver.get(url)  # jaga-jaga kalau open() tidak langsung load
+    except Exception:
+        pass
+    polite_sleep(1.0, 1.6)
+
+    try:
+        jobs = scrape_current_page(driver, container_xpath, keyword)
+        return jobs
+    finally:
+        if close_tab_after:
             try:
-                driver.quit()
+                driver.close()
             except Exception:
                 pass
-            alt = not use_uc
-            driver = _new_driver(alt)
-            time.sleep(0.5)
-            driver.get(url)
-
-        # === Inject cookies jika diminta, lalu reload halaman target ===
-        if cookies_arg:
-            cookies = load_cookies_arg(cookies_arg)
-            if cookies:
-                inject_cookies(driver, cookies, base_url="https://glints.com/")
-                # pastikan kita di halaman explore sesuai parameter
-                try:
-                    driver.get(url)
-                except Exception:
-                    pass
-
-        polite_sleep(1.0, 1.6)
-        try_accept_cookies(driver)
-        _ = wait_for_cards_count(driver, min_count=2, timeout=20)
-        jobs = extract_jobs_from_container(driver, container_xpath, keyword)
-        print(f"[result] jobs parsed: {len(jobs)}")
-        return jobs
-
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-        # benar-benar lepas referensi
-        driver = None
-        
+            # balik ke tab awal jika masih ada
+            if driver.window_handles:
+                driver.switch_to.window(driver.window_handles[0])
+     
 # ===================== Gemini Grouping =====================
 GEMINI_SYSTEM = (
     "You are a job-intelligence assistant. Given a job title, company, location, and optional tags/salary, "
@@ -1063,7 +1063,7 @@ def to_jsonl(items: List[EnrichedJob], path: str):
             row["title"]    = flatten_ws(row.get("title", ""))
             row["company"]  = flatten_ws(row.get("company", ""))
             row["location"] = flatten_ws(row.get("location", ""))
-            row["salary"]   = clean_salary(row.get("salary", ""))
+            row["salary"] = clean_salary(row.get("salary", ""), row.get("title", ""))
             row["link"]     = absolutize_link(row.get("link", ""))
             if isinstance(row.get("tags"), list):
                 row["tags"] = [flatten_ws(t) for t in row["tags"]]
@@ -1081,83 +1081,102 @@ def print_summary(items: List[EnrichedJob]):
 
 # ===================== CLI =====================
 def main():
-    parser = argparse.ArgumentParser(description="Scrape Glints (live DOM) + grouping dengan Gemini 2.5 Flash")
-    parser.add_argument("--keyword", help="Satu atau banyak keyword dipisah koma, mis: \"admin, social media\"")
+    parser = argparse.ArgumentParser(description="Scrape Glints (live DOM) + grouping dengan Gemini 2.5 Flash [multi-keyword = new tab per keyword]")
+    parser.add_argument("--keyword", help='Satu atau banyak keyword dipisah koma, mis: "admin, social media"')
     parser.add_argument("--keywords", help="Alternatif: daftar keyword (koma/baris). Diabaikan jika --keyword ada.")
     parser.add_argument("--country", default="ID", help="Kode negara (default: ID)")
-    parser.add_argument("--max-scrolls", type=int, default=30, help="Jumlah scroll untuk load lebih banyak (default 30)")
+    parser.add_argument("--max-scrolls", type=int, default=30, help="(Tidak dipakai lagi untuk window scroll global; tetap dipakai di internal scroll list)")
     parser.add_argument("--headless", action="store_true", help="Jalankan headless")
     parser.add_argument("--no-headless", dest="headless", action="store_false", help="Jalankan dengan browser terlihat")
     parser.set_defaults(headless=True)
-    parser.add_argument("--use-uc", default=True, action="store_true", help="Gunakan undetected-chromedriver (butuh pip install)")
+    parser.add_argument("--use-uc", action="store_true", help="Gunakan undetected-chromedriver (butuh pip install)")
+    parser.set_defaults(use_uc=True)
     parser.add_argument("--container-xpath", default=DEFAULT_CONTAINER_XPATH, help="XPath container list job")
     parser.add_argument("--out", default="jobs", help="Prefix nama file output (boleh folder/prefix)")
     parser.add_argument("--ai", action="store_true", help="Aktifkan pengelompokan dengan Gemini 2.5 Flash (default: mati)")
-    parser.add_argument(
-        "--cookies",
-        help=("Path ke file cookies (JSON/JSONL/Netscape cookies.txt) "
-              "atau string header 'name=value; name2=value2'. "
-              "Akan diterapkan ke glints.com sebelum scraping."),
-    )
+    parser.add_argument("--cookies", help=("Path ke file cookies (JSON/JSONL/Netscape cookies.txt) atau string header 'name=value; name2=value2'. ""Akan diterapkan ke glints.com sebelum scraping."),)
+    parser.add_argument("--keep-tabs", action="store_true", help="Tidak tutup tab setelah selesai scrape (debugging manual).")
     args = parser.parse_args()
 
-    # Resolusi daftar keyword (preserve order, unique)
+    # Resolve keywords
     kw_raw = args.keyword if args.keyword else args.keywords
     keywords = parse_keywords(kw_raw)
-
     if not keywords:
         parser.error("Harus isi --keyword atau --keywords (bisa dipisah koma atau baris).")
 
-    all_summaries = []
+    # === 1 Driver untuk semua keyword ===
+    driver = init_webdriver(headless=args.headless, use_uc=args.use_uc)
+    try:
+        # buka glints root untuk injeksi cookies (sekali di awal)
+        try:
+            driver.get("https://glints.com/")
+        except Exception:
+            pass
+        if args.cookies:
+            cookies = load_cookies_arg(args.cookies)
+            if cookies:
+                inject_cookies(driver, cookies, base_url="https://glints.com/")
 
-    for i, kw in enumerate(keywords, 1):
-        print(f"\n================= Batch {i}/{len(keywords)} : \"{kw}\" =================")
-        print("[1/3] Scraping Glints…")
-        jobs = scrape_glints(
-            keyword=kw,
-            country=args.country,
-            max_scrolls=args.max_scrolls,
-            headless=args.headless,
-            container_xpath=args.container_xpath,
-            use_uc=args.use_uc,
-            cookies_arg=args.cookies,
-        )
+        polite_sleep(0.8, 1.2)
 
-        if not jobs:
-            print(f"Tidak ada job yang ter-parse untuk keyword: {kw}. "
-                  f"Coba tambah --max-scrolls, jalankan --no-headless, atau --use-uc.")
-            continue
-
-        if args.ai:
-            print("[2/3] Grouping dengan Gemini 2.5 Flash…")
-            items = enrich_jobs_with_gemini(jobs)
-        else:
-            print("[2/3] Lewati grouping (AI OFF)")
-            items = [EnrichedJob(**asdict(j)) for j in jobs]
+        all_summaries = []
+        for kw in keywords:
+            url = GLINTS_BASE_URL.format(keyword=kw.replace(" ", "+"), country=args.country)
+            print(f"\n=== Keyword: \"{kw}\" → buka tab baru ===")
+            if args.keep_tabs:
+                jobs = open_tab_and_scrape(
+                    driver=driver,
+                    url=url,
+                    container_xpath=args.container_xpath,
+                    keyword=kw,
+                    close_tab_after=(not args.keep_tabs),
+                )
+            else:
+                jobs = open_tab_and_scrape(
+                    driver=driver,
+                    url=url,
+                    container_xpath=args.container_xpath,
+                    keyword=kw
+                )
 
 
-        # Penamaan file per keyword (beda batch)
-        slug = slugify(kw)
-        out_prefix = args.out
-        # Jika pengguna memberi folder/prefix, suffix dengan slug keyword
-        csv_path = f"{out_prefix}_{slug}.csv"
-        jsonl_path = f"{out_prefix}_{slug}.jsonl"
+            if not jobs:
+                print(f"[SKIP] Tidak ada job ter-parse untuk: {kw}")
+                continue
 
-        print("[3/3] Menyimpan output…")
-        to_csv(items, csv_path)
-        to_jsonl(items, jsonl_path)
-        print(f"Selesai: {csv_path}, {jsonl_path}")
-        print_summary(items)
+            if args.ai:
+                print("[AI] Grouping dengan Gemini 2.5 Flash…")
+                items = enrich_jobs_with_gemini(jobs)
+            else:
+                items = [EnrichedJob(**asdict(j)) for j in jobs]
 
-        all_summaries.append((kw, len(items)))
+            slug = slugify(kw)
+            out_prefix = args.out
+            csv_path = f"{out_prefix}_{slug}.csv"
+            jsonl_path = f"{out_prefix}_{slug}.jsonl"
 
-    # Rekap semua batch
-    if len(all_summaries) > 1:
-        total = sum(n for _, n in all_summaries)
-        print("\n=== RINGKASAN SEMUA BATCH ===")
-        for kw, n in all_summaries:
-            print(f"  - \"{kw}\": {n} item")
-        print(f"TOTAL: {total} item")
+            to_csv(items, csv_path)
+            to_jsonl(items, jsonl_path)
+            print(f"[DONE] {csv_path}, {jsonl_path}")
+            print_summary(items)
+
+            all_summaries.append((kw, len(items)))
+
+        # Ringkasan simpel (tanpa “batch” wording)
+        if len(all_summaries) > 1:
+            total = sum(n for _, n in all_summaries)
+            print("\n=== RINGKASAN ===")
+            for kw, n in all_summaries:
+                print(f'  - "{kw}": {n} item')
+            print(f"TOTAL: {total} item")
+
+    finally:
+        # kalau keep-tabs aktif, biarkan driver terbuka untuk inspeksi; kalau headless, tutup
+        if not args.keep_tabs:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     main()

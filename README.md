@@ -127,6 +127,7 @@ python glints_scrape_gemini.py --keyword "designer" --country ID --ai
 | `--out` | `jobs` | Prefix output; file jadi `<out>_<slug>.csv` & `<out>_<slug>.jsonl`. |
 | `--ai` | `False` | Aktifkan pengelompokan AI (Gemini 2.5 Flash). **Default: OFF**. |
 | `--cookies` | path / header | Injeksi cookies sebelum scraping; dukung JSON / JSONL / Netscape / header string. |
+| `--keep-tabs` | `False` | Tidak tutup tab setelah selesai scrape (debugging manual). |
 
 ---
 
