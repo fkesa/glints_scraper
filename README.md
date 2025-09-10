@@ -33,7 +33,7 @@ Opsional: **pengelompokan (clustering) lowongan** menggunakan **Gemini 2.5 Flash
 - **Injeksi cookies**: mendukung **JSON**, **JSONL**, **Netscape cookies.txt**, dan **header string**.
 - **Output**: **CSV** (UTF‑8 BOM; aman untuk Excel Windows) dan **JSONL** per keyword.
 - **AI Clustering (opsional)**: **Gemini 2.5 Flash** untuk `cluster`, `category`, `seniority`, `work_mode`, `languages`, `confidence`.  
-  → **AI default OFF**, aktifkan dengan `-ai` / `--ai`.
+  → **AI default OFF**, aktifkan dengan `--ai`.
 
 ---
 
@@ -98,7 +98,7 @@ python glints_scrape_gemini.py --keyword "admin" --no-headless --use-uc --out jo
 ```bash
 python glints_scrape_gemini.py --keyword "social media" --ai --no-headless --use-uc --out jobs_socmed_ai
 # atau
-python glints_scrape_gemini.py --keyword "social media" ---ai --no-headless --use-uc --out jobs_socmed_ai
+python glints_scrape_gemini.py --keyword "social media" --ai --no-headless --use-uc --out jobs_socmed_ai
 ```
 
 **Multiple keyword (pisah koma / baris):**
@@ -125,7 +125,7 @@ python glints_scrape_gemini.py --keyword "designer" --country ID --ai
 | `--use-uc` | **ON** | Gunakan **undetected-chromedriver** (disarankan). |
 | `--container-xpath` | preset default | XPath container list job (opsional, auto-detect jika gagal). |
 | `--out` | `jobs` | Prefix output; file jadi `<out>_<slug>.csv` & `<out>_<slug>.jsonl`. |
-| `-ai`, `--ai` | `False` | Aktifkan pengelompokan AI (Gemini 2.5 Flash). **Default: OFF**. |
+| `--ai` | `False` | Aktifkan pengelompokan AI (Gemini 2.5 Flash). **Default: OFF**. |
 | `--cookies` | path / header | Injeksi cookies sebelum scraping; dukung JSON / JSONL / Netscape / header string. |
 
 ---
