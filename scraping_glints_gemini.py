@@ -12,8 +12,6 @@ Contoh pakai:
     --no-headless ^
     --max-scrolls 40 ^
     --out jobs_social_media
-    --keep-tabs
-
 Gemini:
   Buat .env berisi GEMINI_API_KEY=xxx
   Tambah flag --ai untuk AKTIFKAN pengelompokan AI (default: mati).
